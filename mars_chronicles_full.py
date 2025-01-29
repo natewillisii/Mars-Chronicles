@@ -2,7 +2,9 @@
 import streamlit as st
 import json
 import uuid
+import time
 from openai import OpenAI
+from PIL import Image
 
 ## --------------------------
 ## Configuration & Constants
@@ -10,11 +12,20 @@ from openai import OpenAI
 DEFAULT_PROFILE = {
     "name": "Alex",
     "gender": "Non-binary",
+    "age": 25,
+    "origin": "New York, Earth",
     "genre": "Sci-Fi",
     "progress": 0,
     "inventory": [],
     "location": "Mars Colony Alpha",
-    "story_id": str(uuid.uuid4())
+    "story_id": str(uuid.uuid4()),
+    "created": False,
+    "locations": [
+        {"name": "Mars Colony Alpha", "image": "images/colony_alpha.jpg"},
+        {"name": "Olympus Mons Outpost", "image": "images/olympus_mons.jpg"},
+        {"name": "Valles Marineris Hub", "image": "images/valles_marineris.jpg"},
+        {"name": "Polar Caps Station", "image": "images/polar_caps.jpg"}
+    ]
 }
 
 GENRES = [
@@ -22,49 +33,68 @@ GENRES = [
     "Political Thriller", "Cyberpunk", "Survival", "Historical Fiction", "Noir"
 ]
 
-DEEPSEEK_CLIENT = OpenAI(
-    api_key=st.secrets["DEEPSEEK_KEY"],
-    base_url="https://api.deepseek.com"
-)
+EARTH_ORIGINS = [
+    "New York, Earth", "Tokyo, Earth", "Mumbai, Earth", "Cairo, Earth",
+    "São Paulo, Earth", "Sydney, Earth", "London, Earth", "Shanghai, Earth",
+    "Dubai, Earth", "Nairobi, Earth"
+]
 
 ## --------------------------
-## Session Management
+## Cached Resources
 ## --------------------------
-def init_session():
-    if 'user_data' not in st.session_state:
-        st.session_state.user_data = DEFAULT_PROFILE.copy()
-    if 'story_choices' not in st.session_state:
-        st.session_state.story_choices = []
+@st.cache_resource
+def get_api_client():
+    return OpenAI(
+        api_key=st.secrets["DEEPSEEK_KEY"],
+        base_url="https://api.deepseek.com"
+    )
+
+@st.cache_data
+def load_image(path: str):
+    try:
+        return Image.open(path)
+    except FileNotFoundError:
+        return None
 
 ## --------------------------
-## Story Generation Engine
+## Core Game Functionality
 ## --------------------------
 def generate_story_segment(context: str) -> tuple:
     """Generate story segment with 2-4 choices using DeepSeek R1"""
     try:
-        response = DEEPSEEK_CLIENT.chat.completions.create(
+        client = get_api_client()
+        response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{
                 "role": "system",
                 "content": f"""Generate a branching narrative segment for a Mars colony story with:
-                - Protagonist: {st.session_state.user_data['name']} ({st.session_state.user_data['gender']})
+                - Protagonist: {st.session_state.user_data['name']} 
+                - Gender: {st.session_state.user_data['gender']}
+                - Age: {st.session_state.user_data['age']}
+                - Earth Origin: {st.session_state.user_data['origin']}
                 - Genre: {st.session_state.user_data['genre']}
                 - Current location: {st.session_state.user_data['location']}
                 - Previous context: {context}
                 
                 Format rules:
-                1. Write 2-3 paragraph story segment
-                2. End with 2-4 numbered choices
-                3. Keep choices impactful and distinct"""
+                1. Incorporate character background
+                2. 2-3 paragraph story segment
+                3. End with 2-4 numbered choices
+                4. Maintain continuity"""
             }],
-            temperature=0.7,   # Controls creativity (0=deterministic, 1=random)
-            top_p=0.9,         # Focuses response distribution
-            max_tokens=1500    # Allows longer complex narratives
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=1500
         )
         
         full_text = response.choices[0].message.content
         story_text = "\n".join([line for line in full_text.split("\n") if not line.startswith(('1.', '2.', '3.', '4.'))])
         choices = [line[3:] for line in full_text.split("\n") if line.startswith(tuple(f"{i}." for i in range(1,5)))]
+        
+        # Update location based on progress
+        progress = st.session_state.user_data['progress'] + 1
+        if progress < len(st.session_state.user_data['locations']):
+            st.session_state.user_data['location'] = st.session_state.user_data['locations'][progress]['name']
         
         return story_text, choices[:4]
     
@@ -73,65 +103,109 @@ def generate_story_segment(context: str) -> tuple:
         return None, []
 
 ## --------------------------
-## Game State Management
-## --------------------------
-def save_game_state():
-    return json.dumps(st.session_state.user_data)
-
-def load_game_state(uploaded_file):
-    try:
-        data = json.load(uploaded_file)
-        st.session_state.user_data.update(data)
-        st.success("Game loaded successfully!")
-    except Exception as e:
-        st.error(f"Invalid save file: {str(e)}")
-
-## --------------------------
 ## UI Components
 ## --------------------------
-def display_choices(choices: list):
-    """Create adaptive columns for 2-4 choices"""
-    col_count = min(len(choices), 4)
-    cols = st.columns(col_count)
+def show_loading(message="Generating your Mars adventure..."):
+    """Modern loading screen"""
+    with st.spinner(message):
+        time.sleep(1.5)
+
+def show_colony_map():
+    """Display current colony map"""
+    location_name = st.session_state.user_data['location']
+    location = next((loc for loc in st.session_state.user_data['locations'] 
+                    if loc['name'] == location_name), None)
     
-    for idx, choice in enumerate(choices):
-        with cols[idx % col_count]:
-            if st.button(choice, key=f"choice_{idx}"):
-                st.session_state.user_data['progress'] += 1
-                st.session_state.story_choices.append(choice)
-                st.rerun()
+    if location:
+        img = load_image(location['image'])
+        if img:
+            st.sidebar.image(img, use_column_width=True, caption=location_name)
+            st.sidebar.markdown(f"**Current Location:** {location_name}")
+        else:
+            st.sidebar.error("Map image not found!")
 
 ## --------------------------
-## Main Application
+## Main Application Flow
 ## --------------------------
 def main():
-    st.set_page_config(page_title="Mars Chronicles 2035", layout="wide")
-    init_session()
+    st.set_page_config(
+        page_title="Mars Chronicles 2035",
+        page_icon="🚀",
+        layout="wide"
+    )
     
-    # Sidebar Controls
-    with st.sidebar:
-        st.header("Character Profile")
-        st.session_state.user_data['name'] = st.text_input("Name", value=st.session_state.user_data['name'])
-        st.session_state.user_data['gender'] = st.selectbox(
-            "Gender",
-            ["Male", "Female", "Non-binary", "Other"],
-            index=["Male", "Female", "Non-binary", "Other"].index(st.session_state.user_data['gender'])
-        )
-        st.session_state.user_data['genre'] = st.selectbox("Story Genre", GENRES, index=GENRES.index(st.session_state.user_data['genre']))
+    # Initialize session state
+    if 'user_data' not in st.session_state:
+        st.session_state.user_data = DEFAULT_PROFILE.copy()
+    if 'story_choices' not in st.session_state:
+        st.session_state.story_choices = []
+    
+    # Character Creation
+    if not st.session_state.user_data['created']:
+        st.title("🚀 Mars Chronicles 2035 - Character Creation")
         
-        # Save/Load System
+        with st.form("character_creation"):
+            st.header("Create Your Character")
+            
+            name = st.text_input("Character Name", value=DEFAULT_PROFILE['name'])
+            gender = st.selectbox(
+                "Gender Identity",
+                ["Male", "Female", "Non-binary", "Other"],
+                index=2
+            )
+            age = st.number_input(
+                "Character Age (Earth Years)",
+                min_value=1,
+                max_value=125,
+                value=25
+            )
+            origin = st.selectbox(
+                "Earth Origin",
+                EARTH_ORIGINS,
+                index=0
+            )
+            genre = st.selectbox(
+                "Story Genre", 
+                GENRES, 
+                index=0
+            )
+            
+            if st.form_submit_button("Begin Your Mars Adventure"):
+                st.session_state.user_data.update({
+                    "name": name,
+                    "gender": gender,
+                    "age": age,
+                    "origin": origin,
+                    "genre": genre,
+                    "created": True
+                })
+                show_loading("Initializing your Mars colony...")
+                st.rerun()
+        
+        return
+    
+    # Main Game Interface
+    with st.sidebar:
+        st.header("Martian Colony Map")
+        show_colony_map()
+        
+        st.header("Game Controls")
         st.download_button(
             label="💾 Save Progress",
-            data=save_game_state(),
+            data=json.dumps(st.session_state.user_data),
             file_name=f"mars_story_{st.session_state.user_data['story_id']}.json",
             mime="application/json"
         )
         uploaded_file = st.file_uploader("⬆️ Load Game", type=["json"])
         if uploaded_file:
-            load_game_state(uploaded_file)
-
-    # Main Story Interface
-    st.title("🚀 Mars Chronicles 2035")
+            try:
+                data = json.load(uploaded_file)
+                st.session_state.user_data.update(data)
+                st.success("Game loaded successfully!")
+            except Exception as e:
+                st.error(f"Invalid save file: {str(e)}")
+    
+    st.title("🚀 Your Mars Chronicle")
     
     # Generate Story Content
     context = "New story" if st.session_state.user_data['progress'] == 0 else \
@@ -142,7 +216,16 @@ def main():
     if story_text and choices:
         st.markdown(f"### Chapter {st.session_state.user_data['progress'] + 1}")
         st.markdown(story_text)
-        display_choices(choices)
+        
+        # Display choices
+        cols = st.columns(min(len(choices), 4))
+        for idx, choice in enumerate(choices):
+            with cols[idx % 4]:
+                if st.button(choice, key=f"choice_{idx}"):
+                    st.session_state.user_data['progress'] += 1
+                    st.session_state.story_choices.append(choice)
+                    show_loading()
+                    st.rerun()
     elif not choices:
         st.warning("Failed to generate valid story choices. Try again!")
 
